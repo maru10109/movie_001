@@ -4,12 +4,13 @@ import numpy as np
 import plotly.express as px
 from sklearn.cluster import KMeans
 from sklearn.preprocessing import StandardScaler
+from sklearn.metrics import silhouette_score
 
 # 앱 설정
 st.set_page_config(page_title="영화 유형 나누기", page_icon="🎬", layout="wide")
 
 st.title("🎬 영화 유형 나누기")
-st.markdown("영화 데이터를 분석하여 비슷한 특성을 가진 영화들을 묶어봅니다.")
+st.markdown("영화 데이터를 분석하여 비슷한 특성을 가진 영화들을 묶어보고, 최적의 묶음 수를 탐색해 봅니다.")
 
 @st.cache_data
 def load_data():
@@ -29,7 +30,7 @@ if df is not None:
     
     # 사용할 4가지 속성이 존재하고, 첫 주 관객수가 0이 아닌 데이터만 필터링
     df_filtered = df.dropna(subset=['first_scrn', 'total_audi', 'days_in_top10', 'first_week_audi'])
-    df_filtered = df_filtered[df_filtered['first_week_audi'] > 0]
+    df_filtered = df_filtered[df_filtered['first_week_audi'] > 0].copy()
     
     # 롱런 지수 계산 및 20 초과 값 자르기
     df_filtered['long_run_index'] = df_filtered['total_audi'] / df_filtered['first_week_audi']
@@ -58,6 +59,14 @@ if df is not None:
         default=list(features_mapping.keys())
     )
     
+    num_clusters = st.sidebar.slider(
+        "묶음 수 (2~7):", 
+        min_value=2, 
+        max_value=7, 
+        value=3,
+        step=1
+    )
+    
     selected_features = [features_mapping[label] for label in selected_features_labels]
 
     if len(selected_features) < 2:
@@ -67,17 +76,25 @@ if df is not None:
         scaler = StandardScaler()
         scaled_data = scaler.fit_transform(df_filtered[selected_features])
         
-        # K-평균 클러스터링 (난수 고정)
-        kmeans = KMeans(n_clusters=3, random_state=42, n_init=10)
+        # 선택된 묶음 수로 K-평균 클러스터링 진행 (난수 고정)
+        kmeans = KMeans(n_clusters=num_clusters, random_state=42, n_init=10)
         df_filtered['cluster'] = kmeans.fit_predict(scaled_data)
         
-        # 클러스터 이름 매핑 (누적 관객 평균순으로 ㉮, ㉯, ㉰)
+        # 클러스터 이름 매핑 (누적 관객 평균순으로 ㉮~㉴ 부여)
         cluster_audi_mean = df_filtered.groupby('cluster')['total_audi'].mean().sort_values(ascending=False)
-        cluster_names = {cluster_audi_mean.index[0]: '㉮', cluster_audi_mean.index[1]: '㉯', cluster_audi_mean.index[2]: '㉰'}
+        cluster_symbols = ['㉮', '㉯', '㉰', '㉱', '㉲', '㉳', '㉴']
+        
+        cluster_names = {}
+        ordered_categories = []
+        for i, original_cluster_idx in enumerate(cluster_audi_mean.index):
+            symbol = cluster_symbols[i]
+            cluster_names[original_cluster_idx] = symbol
+            ordered_categories.append(symbol)
+            
         df_filtered['cluster_name'] = df_filtered['cluster'].map(cluster_names)
         
-        # 시각화를 위해 클러스터 이름을 정렬된 순서(㉮, ㉯, ㉰)로 범주형 변수로 변환
-        df_filtered['cluster_name'] = pd.Categorical(df_filtered['cluster_name'], categories=['㉮', '㉯', '㉰'], ordered=True)
+        # 시각화를 위해 클러스터 이름을 정렬된 범주형 변수로 변환
+        df_filtered['cluster_name'] = pd.Categorical(df_filtered['cluster_name'], categories=ordered_categories, ordered=True)
 
         st.header("1. 2차원 산점도")
         col1, col2 = st.columns(2)
@@ -100,7 +117,7 @@ if df is not None:
 
         st.header("2. 3차원 산점도")
         if len(selected_features) < 3:
-            st.info("3차원 산점도를 그리려면 3개 이상의 속성을 선택해야 합니다.")
+            st.info("💡 3차원 산점도를 그리려면 사이드바에서 3개 이상의 속성을 선택해야 합니다.")
         else:
             col3, col4, col5 = st.columns(3)
             with col3:
@@ -131,8 +148,6 @@ if df is not None:
             st.plotly_chart(fig_3d, use_container_width=True)
 
         st.header("3. 묶음 요약")
-        
-        # 요약 통계 계산을 위해 그룹화
         summary_df = df_filtered.groupby('cluster_name', observed=False).agg(
             편수=('movieCd', 'count'),
             스크린수_평균=('first_scrn', 'mean'),
@@ -141,7 +156,6 @@ if df is not None:
             롱런지수_평균=('long_run_index', 'mean')
         ).reset_index()
         
-        # 열 이름 변경
         summary_df = summary_df.rename(columns={'cluster_name': '묶음'})
         
         # 숫자 형식 지정
@@ -152,12 +166,67 @@ if df is not None:
         
         st.dataframe(summary_df, hide_index=True, use_container_width=True)
         
-        st.header("4. 묶음별 누적 관객 상위 5편")
-        cols = st.columns(3)
+        st.header(f"4. 묶음별 누적 관객 상위 5편")
         
-        for i, cluster in enumerate(['㉮', '㉯', '㉰']):
+        # 선택된 클러스터 수만큼 컬럼 생성
+        cols = st.columns(num_clusters)
+        
+        for i, cluster_sym in enumerate(ordered_categories):
             with cols[i]:
-                st.subheader(f"묶음 {cluster}")
-                top_movies = df_filtered[df_filtered['cluster_name'] == cluster].sort_values(by='total_audi', ascending=False).head(5)
+                st.subheader(f"묶음 {cluster_sym}")
+                top_movies = df_filtered[df_filtered['cluster_name'] == cluster_sym].sort_values(by='total_audi', ascending=False).head(5)
                 for _, row in top_movies.iterrows():
-                    st.write(f"- {row['movieNm']} ({row['total_audi']:,}명)")
+                    st.write(f"- {row['movieNm']}\n  ({row['total_audi']:,}명)")
+
+        st.divider()
+
+        st.header("5. 최적의 묶음 수 찾기 (현재 선택 속성 기준)")
+        
+        # 실루엣 점수 계산 및 표시
+        sil_score = silhouette_score(scaled_data, df_filtered['cluster'])
+        st.info(f"✨ **현재 묶음 수({num_clusters}개)의 실루엣 점수:** `{sil_score:.4f}` (점수는 -1에서 1 사이이며, 1에 가까울수록 묶음이 뚜렷하다는 뜻입니다.)")
+
+        # 1부터 7까지의 Inertia 계산
+        inertias = []
+        k_range = range(1, 8)
+        
+        for k in k_range:
+            km = KMeans(n_clusters=k, random_state=42, n_init=10)
+            km.fit(scaled_data)
+            inertias.append(km.inertia_)
+        
+        # 꺾은선 그래프 생성
+        fig_elbow = px.line(
+            x=list(k_range), 
+            y=inertias, 
+            markers=True,
+            title="묶음 수에 따른 거리 제곱합 (엘보우 방법)",
+            labels={'x': '묶음 수', 'y': '거리의 제곱합 (Inertia)'}
+        )
+        
+        # 현재 선택한 묶음 수에 세로선 추가
+        fig_elbow.add_vline(
+            x=num_clusters, 
+            line_dash="dash", 
+            line_color="red", 
+            annotation_text=f"현재 선택 ({num_clusters}개) "
+        )
+        
+        st.plotly_chart(fig_elbow, use_container_width=True)
+
+        # 표 생성
+        elbow_df = pd.DataFrame({
+            '묶음 수': list(k_range),
+            '거리 제곱합': inertias
+        })
+        
+        # 바로 앞 값과 비교하여 줄어든 양 계산
+        elbow_df['전 단계 대비 감소량'] = elbow_df['거리 제곱합'].shift(1) - elbow_df['거리 제곱합']
+        
+        # 보기 좋게 포맷팅 (첫 줄 빈칸 처리)
+        display_df = elbow_df.copy()
+        display_df['거리 제곱합'] = display_df['거리 제곱합'].apply(lambda x: f"{x:,.2f}")
+        display_df['전 단계 대비 감소량'] = display_df['전 단계 대비 감소량'].apply(lambda x: f"{x:,.2f}" if pd.notna(x) else "")
+        
+        st.write("📊 **묶음 수별 거리 제곱합 및 감소량 표**")
+        st.dataframe(display_df, hide_index=True, use_container_width=True)
